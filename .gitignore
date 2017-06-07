@@ -15,3 +15,5 @@ build/
 captures/
 .DS_Store
 google-services.json
+build.gradle
+gradle/wrapper/gradle-wrapper.properties
