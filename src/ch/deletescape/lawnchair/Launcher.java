@@ -53,6 +53,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Message;
 import android.os.StrictMode;
+import android.os.UserHandle;
 import android.support.annotation.NonNull;
 import android.text.Selection;
 import android.text.SpannableStringBuilder;
@@ -76,7 +77,7 @@ import android.widget.ImageView;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import ch.deletescape.lawnchair.LauncherTab;
+import com.google.android.libraries.launcherclient.LauncherClient;
 import com.google.firebase.analytics.FirebaseAnalytics;
 import com.google.firebase.crash.FirebaseCrash;
 
@@ -95,7 +96,6 @@ import ch.deletescape.lawnchair.allapps.AllAppsTransitionController;
 import ch.deletescape.lawnchair.allapps.DefaultAppSearchController;
 import ch.deletescape.lawnchair.compat.AppWidgetManagerCompat;
 import ch.deletescape.lawnchair.compat.LauncherAppsCompat;
-import android.os.UserHandle;
 import ch.deletescape.lawnchair.compat.UserManagerCompat;
 import ch.deletescape.lawnchair.config.FeatureFlags;
 import ch.deletescape.lawnchair.dragndrop.DragController;
@@ -206,6 +206,7 @@ public class Launcher extends Activity
     @Thunk
     DragLayer mDragLayer;
     private DragController mDragController;
+    private View mQsbContainer;
 
     private AppWidgetManagerCompat mAppWidgetManager;
     private LauncherAppWidgetHost mAppWidgetHost;
@@ -310,6 +311,7 @@ public class Launcher extends Activity
 
     @Thunk
     Runnable mBuildLayersRunnable = new Runnable() {
+        @Override
         public void run() {
             if (mWorkspace != null) {
                 mWorkspace.buildPageHardwareLayers();
@@ -422,7 +424,7 @@ public class Launcher extends Activity
         }
         if (newSystemUiFlags != oldSystemUiFlags) {
             final int systemUiFlags = newSystemUiFlags;
-            runOnUiThread(new Runnable(){
+            runOnUiThread(new Runnable() {
                 @Override
                 public void run() {
                     getWindow().getDecorView().setSystemUiVisibility(systemUiFlags);
@@ -939,6 +941,7 @@ public class Launcher extends Activity
         mDragLayer = (DragLayer) findViewById(R.id.drag_layer);
         mFocusHandler = mDragLayer.getFocusIndicatorHelper();
         mWorkspace = (Workspace) mDragLayer.findViewById(R.id.workspace);
+        mQsbContainer = mDragLayer.findViewById(R.id.qsb_container);
         mWorkspace.initParentViews(mDragLayer);
 
         mLauncherView.setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
@@ -964,7 +967,7 @@ public class Launcher extends Activity
         // Until the workspace is bound, ensure that we keep the wallpaper offset locked to the
         // default state, otherwise we will update to the wrong offsets in RTL
         mWorkspace.lockWallpaperToDefaultPage();
-        mWorkspace.bindAndInitFirstWorkspaceScreen();
+        mWorkspace.bindAndInitFirstWorkspaceScreen(null /* recycled qsb */);
         mDragController.addDragListener(mWorkspace);
 
         // Get the search/delete/uninstall bar
@@ -998,7 +1001,7 @@ public class Launcher extends Activity
 
         // Bind wallpaper button actions
         View wallpaperButton = findViewById(R.id.wallpaper_button);
-        if(Utilities.isWallapaperAllowed(getApplicationContext())) {
+        if (Utilities.isWallapaperAllowed(getApplicationContext())) {
             wallpaperButton.setOnClickListener(new OnClickListener() {
                 @Override
                 public void onClick(View view) {
@@ -1259,6 +1262,7 @@ public class Launcher extends Activity
                 observer.addOnDrawListener(new ViewTreeObserver.OnDrawListener() {
                     private boolean mStarted = false;
 
+                    @Override
                     public void onDraw() {
                         if (mStarted) return;
                         mStarted = true;
@@ -1270,6 +1274,7 @@ public class Launcher extends Activity
                         mWorkspace.postDelayed(mBuildLayersRunnable, 500);
                         final ViewTreeObserver.OnDrawListener listener = this;
                         mWorkspace.post(new Runnable() {
+                            @Override
                             public void run() {
                                 if (mWorkspace != null &&
                                         mWorkspace.getViewTreeObserver() != null) {
@@ -1324,6 +1329,7 @@ public class Launcher extends Activity
                     final int delay = ADVANCE_STAGGER * i;
                     if (v instanceof Advanceable) {
                         mHandler.postDelayed(new Runnable() {
+                            @Override
                             public void run() {
                                 ((Advanceable) v).advance();
                             }
@@ -1373,6 +1379,10 @@ public class Launcher extends Activity
 
     public Workspace getWorkspace() {
         return mWorkspace;
+    }
+
+    public View getQsbContainer() {
+        return mQsbContainer;
     }
 
     public Hotseat getHotseat() {
@@ -1437,7 +1447,7 @@ public class Launcher extends Activity
             // If we are already on home, then just animate back to the workspace,
             // otherwise, just wait until onResume to set the state back to Workspace
             if (alreadyOnHome) {
-                if (mState != State.WORKSPACE || mWorkspace.getCurrentPage() != 0 || mOverviewPanel.getVisibility() == View.VISIBLE ) {
+                if (mState != State.WORKSPACE || mWorkspace.getCurrentPage() != 0 || mOverviewPanel.getVisibility() == View.VISIBLE) {
                     showWorkspace(true);
                 } else {
                     showAppsView(true, false);
@@ -1837,6 +1847,7 @@ public class Launcher extends Activity
             // Deleting an app widget ID is a void call but writes to disk before returning
             // to the caller...
             new AsyncTask<Void, Void, Void>() {
+                @Override
                 public Void doInBackground(Void... args) {
                     appWidgetHost.deleteAppWidgetId(widgetInfo.appWidgetId);
                     return null;
@@ -1898,6 +1909,7 @@ public class Launcher extends Activity
      *
      * @param v The view representing the clicked shortcut.
      */
+    @Override
     public void onClick(View v) {
         // Make sure that rogue clicks don't get through while allapps is launching, or after the
         // view has detached (it's possible for this to happen if the view is removed mid touch).
@@ -1942,6 +1954,7 @@ public class Launcher extends Activity
         }
     }
 
+    @Override
     @SuppressLint("ClickableViewAccessibility")
     public boolean onTouch(View v, MotionEvent event) {
         return false;
@@ -1987,6 +2000,7 @@ public class Launcher extends Activity
             final String packageName = info.providerName.getPackageName();
             showBrokenAppInstallDialog(packageName,
                     new DialogInterface.OnClickListener() {
+                        @Override
                         public void onClick(DialogInterface dialog, int id) {
                             startActivitySafely(v, LauncherModel.getMarketIntent(packageName), info);
                         }
@@ -2027,6 +2041,7 @@ public class Launcher extends Activity
                 .setPositiveButton(R.string.abandoned_search, onSearchClickListener)
                 .setNeutralButton(R.string.abandoned_clean_this,
                         new DialogInterface.OnClickListener() {
+                            @Override
                             public void onClick(DialogInterface dialog, int id) {
                                 final UserHandle user = Utilities.myUserHandle();
                                 mWorkspace.removeAbandonedPromise(packageName, user);
@@ -2082,6 +2097,7 @@ public class Launcher extends Activity
             showBrokenAppInstallDialog(
                     shortcut.getTargetComponent().getPackageName(),
                     new DialogInterface.OnClickListener() {
+                        @Override
                         public void onClick(DialogInterface dialog, int id) {
                             startAppShortcutOrInfoActivity(v);
                         }
@@ -2684,6 +2700,7 @@ public class Launcher extends Activity
             getWindow().getDecorView()
                     .sendAccessibilityEvent(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED);
         }
+        mWorkspace.updateQsbVisibility();
         return changed;
     }
 
@@ -2971,6 +2988,7 @@ public class Launcher extends Activity
      * <p>
      * Implementation of the method from LauncherModel.Callbacks.
      */
+    @Override
     public void startBinding() {
         setWorkspaceLoading(true);
 
@@ -2987,13 +3005,10 @@ public class Launcher extends Activity
     @Override
     public void bindScreens(ArrayList<Long> orderedScreenIds) {
         // Make sure the first screen is always at the start.
-        if (orderedScreenIds.indexOf(Workspace.FIRST_SCREEN_ID) != 0) {
+        if (FeatureFlags.showPixelBar(this) && orderedScreenIds.indexOf(Workspace.FIRST_SCREEN_ID) != 0) {
             orderedScreenIds.remove(Workspace.FIRST_SCREEN_ID);
             orderedScreenIds.add(0, Workspace.FIRST_SCREEN_ID);
             mModel.updateWorkspaceScreenOrder(this, orderedScreenIds);
-        } else if (orderedScreenIds.isEmpty()) {
-            // If there are no screens, we need to have an empty screen
-            mWorkspace.addExtraEmptyScreen();
         }
         bindAddScreens(orderedScreenIds);
 
@@ -3014,11 +3029,13 @@ public class Launcher extends Activity
         }
     }
 
+    @Override
     public void bindAppsAdded(final ArrayList<Long> newScreens,
                               final ArrayList<ItemInfo> addNotAnimated,
                               final ArrayList<ItemInfo> addAnimated,
                               final ArrayList<AppInfo> addedApps) {
         Runnable r = new Runnable() {
+            @Override
             public void run() {
                 bindAppsAdded(newScreens, addNotAnimated, addAnimated, addedApps);
             }
@@ -3060,6 +3077,7 @@ public class Launcher extends Activity
     public void bindItems(final ArrayList<ItemInfo> shortcuts, final int start, final int end,
                           final boolean forceAnimateIcons) {
         Runnable r = new Runnable() {
+            @Override
             public void run() {
                 bindItems(shortcuts, start, end, forceAnimateIcons);
             }
@@ -3132,6 +3150,7 @@ public class Launcher extends Activity
                 long currentScreenId = mWorkspace.getScreenIdForPageIndex(mWorkspace.getNextPage());
                 final int newScreenIndex = mWorkspace.getPageIndexForScreenId(newShortcutsScreenId);
                 final Runnable startBounceAnimRunnable = new Runnable() {
+                    @Override
                     public void run() {
                         anim.playTogether(bounceAnims);
                         anim.start();
@@ -3141,6 +3160,7 @@ public class Launcher extends Activity
                     // We post the animation slightly delayed to prevent slowdowns
                     // when we are loading right after we return to launcher.
                     mWorkspace.postDelayed(new Runnable() {
+                        @Override
                         public void run() {
                             if (mWorkspace != null) {
                                 mWorkspace.snapToPage(newScreenIndex);
@@ -3171,8 +3191,10 @@ public class Launcher extends Activity
      * <p>
      * Implementation of the method from LauncherModel.Callbacks.
      */
+    @Override
     public void bindAppWidget(final LauncherAppWidgetInfo item) {
         Runnable r = new Runnable() {
+            @Override
             public void run() {
                 bindAppWidget(item);
             }
@@ -3302,6 +3324,7 @@ public class Launcher extends Activity
         return info;
     }
 
+    @Override
     public void onPageBoundSynchronously(int page) {
         mSynchronouslyBoundPages.add(page);
     }
@@ -3324,6 +3347,7 @@ public class Launcher extends Activity
     @Override
     public void finishFirstPageBind(final ViewOnDrawExecutor executor) {
         Runnable r = new Runnable() {
+            @Override
             public void run() {
                 finishFirstPageBind(executor);
             }
@@ -3352,8 +3376,10 @@ public class Launcher extends Activity
      * <p>
      * Implementation of the method from LauncherModel.Callbacks.
      */
+    @Override
     public void finishBindingItems() {
         Runnable r = new Runnable() {
+            @Override
             public void run() {
                 finishBindingItems();
             }
@@ -3402,6 +3428,7 @@ public class Launcher extends Activity
     @Thunk
     ArrayList<AppInfo> mTmpAppsList;
     private Runnable mBindAllApplicationsRunnable = new Runnable() {
+        @Override
         public void run() {
             bindAllApplications(mTmpAppsList);
             mTmpAppsList = null;
@@ -3413,6 +3440,7 @@ public class Launcher extends Activity
      * <p>
      * Implementation of the method from LauncherModel.Callbacks.
      */
+    @Override
     public void bindAllApplications(final ArrayList<AppInfo> apps) {
         if (waitUntilResume(mBindAllApplicationsRunnable, true)) {
             mTmpAppsList = apps;
@@ -3451,8 +3479,10 @@ public class Launcher extends Activity
      * <p>
      * Implementation of the method from LauncherModel.Callbacks.
      */
+    @Override
     public void bindAppsUpdated(final ArrayList<AppInfo> apps) {
         Runnable r = new Runnable() {
+            @Override
             public void run() {
                 bindAppsUpdated(apps);
             }
@@ -3469,6 +3499,7 @@ public class Launcher extends Activity
     @Override
     public void bindWidgetsRestored(final ArrayList<LauncherAppWidgetInfo> widgets) {
         Runnable r = new Runnable() {
+            @Override
             public void run() {
                 bindWidgetsRestored(widgets);
             }
@@ -3492,6 +3523,7 @@ public class Launcher extends Activity
     public void bindShortcutsChanged(final ArrayList<ShortcutInfo> updated,
                                      final ArrayList<ShortcutInfo> removed, final UserHandle user) {
         Runnable r = new Runnable() {
+            @Override
             public void run() {
                 bindShortcutsChanged(updated, removed, user);
             }
@@ -3538,6 +3570,7 @@ public class Launcher extends Activity
     @Override
     public void bindRestoreItemsChange(final HashSet<ItemInfo> updates) {
         Runnable r = new Runnable() {
+            @Override
             public void run() {
                 bindRestoreItemsChange(updates);
             }
@@ -3561,6 +3594,7 @@ public class Launcher extends Activity
             final HashSet<String> packageNames, final HashSet<ComponentName> components,
             final UserHandle user) {
         Runnable r = new Runnable() {
+            @Override
             public void run() {
                 bindWorkspaceComponentsRemoved(packageNames, components, user);
             }
@@ -3584,6 +3618,7 @@ public class Launcher extends Activity
     @Override
     public void bindAppInfosRemoved(final ArrayList<AppInfo> appInfos) {
         Runnable r = new Runnable() {
+            @Override
             public void run() {
                 bindAppInfosRemoved(appInfos);
             }
@@ -3599,6 +3634,7 @@ public class Launcher extends Activity
     }
 
     private Runnable mBindWidgetModelRunnable = new Runnable() {
+        @Override
         public void run() {
             bindWidgetsModel(mWidgetsModel);
         }
@@ -3673,7 +3709,11 @@ public class Launcher extends Activity
         mWorkspace.setLauncherOverlay(overlay);
     }
 
-    public boolean isClientConnected(){
+    public LauncherClient getClient() {
+        return mLauncherTab.getClient();
+    }
+
+    public boolean isClientConnected() {
         return mLauncherTab.getClient().isConnected();
     }
 

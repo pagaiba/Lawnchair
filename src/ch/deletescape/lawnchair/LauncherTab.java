@@ -16,11 +16,10 @@
 
 package ch.deletescape.lawnchair;
 
-import ch.deletescape.lawnchair.Launcher.LauncherOverlay;
-
 import com.google.android.libraries.launcherclient.LauncherClient;
-import com.google.android.libraries.launcherclient.LauncherClientCallbacksAdapter;
 import com.google.firebase.analytics.FirebaseAnalytics;
+
+import ch.deletescape.lawnchair.Launcher.LauncherOverlay;
 
 public class LauncherTab {
 
@@ -28,7 +27,7 @@ public class LauncherTab {
     private FirebaseAnalytics fa;
 
     public LauncherTab(Launcher launcher) {
-        mLauncherClient = new LauncherClient(launcher, new LauncherClientCallbacksAdapter(), true);
+        mLauncherClient = new LauncherClient(launcher, true);
 
         launcher.setLauncherOverlay(new LauncherOverlays());
         fa = FirebaseAnalytics.getInstance(launcher);

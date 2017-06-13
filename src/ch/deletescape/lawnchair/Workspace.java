@@ -41,6 +41,7 @@ import android.graphics.drawable.Drawable;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Parcelable;
+import android.os.UserHandle;
 import android.util.AttributeSet;
 import android.util.Log;
 import android.util.Property;
@@ -64,10 +65,6 @@ import ch.deletescape.lawnchair.accessibility.OverviewAccessibilityDelegate;
 import ch.deletescape.lawnchair.accessibility.OverviewScreenAccessibilityDelegate;
 import ch.deletescape.lawnchair.accessibility.WorkspaceAccessibilityHelper;
 import ch.deletescape.lawnchair.compat.AppWidgetManagerCompat;
-import android.os.UserHandle;
-
-import com.google.android.libraries.launcherclient.LauncherClient;
-
 import ch.deletescape.lawnchair.config.FeatureFlags;
 import ch.deletescape.lawnchair.dragndrop.DragController;
 import ch.deletescape.lawnchair.dragndrop.DragLayer;
@@ -81,6 +78,7 @@ import ch.deletescape.lawnchair.folder.FolderIcon;
 import ch.deletescape.lawnchair.graphics.DragPreviewProvider;
 import ch.deletescape.lawnchair.util.ItemInfoMatcher;
 import ch.deletescape.lawnchair.util.LongArrayMap;
+import ch.deletescape.lawnchair.util.MultiStateAlphaController;
 import ch.deletescape.lawnchair.util.Thunk;
 import ch.deletescape.lawnchair.util.VerticalFlingDetector;
 import ch.deletescape.lawnchair.util.WallpaperOffsetInterpolator;
@@ -223,6 +221,13 @@ public class Workspace extends PagedView
      */
     private float[] mHotseatAlpha = new float[]{1, 1, 1};
 
+    public static final int QSB_ALPHA_INDEX_STATE_CHANGE = 0;
+    public static final int QSB_ALPHA_INDEX_Y_TRANSLATION = 1;
+    public static final int QSB_ALPHA_INDEX_PAGE_SCROLL = 2;
+    public static final int QSB_ALPHA_INDEX_OVERLAY_SCROLL = 3;
+
+    public MultiStateAlphaController mQsbAlphaController;
+
     @ViewDebug.ExportedProperty(category = "launcher")
     private State mState = State.NORMAL;
     private boolean mIsSwitchingState = false;
@@ -305,6 +310,7 @@ public class Workspace extends PagedView
     // Total over scrollX in the overlay direction.
     private float mOverlayTranslation;
     private int mFirstPageScrollX;
+    private boolean mIgnoreQsbScroll;
 
 
     boolean mScrollInteractionBegan;
@@ -315,6 +321,7 @@ public class Workspace extends PagedView
     private WorkspaceStateTransitionAnimation mStateTransitionAnimation;
 
     private AccessibilityDelegate mPagesAccessibilityDelegate;
+    private OnStateChangeListener mOnStateChangeListener;
 
     /**
      * Used to inflate the Workspace from XML.
@@ -487,6 +494,7 @@ public class Workspace extends PagedView
     public void initParentViews(View parent) {
         super.initParentViews(parent);
         mPageIndicator.setAccessibilityDelegate(new OverviewAccessibilityDelegate());
+        mQsbAlphaController = new MultiStateAlphaController(mLauncher.getQsbContainer(), 4);
     }
 
     private void setupLayoutTransition() {
@@ -519,6 +527,7 @@ public class Workspace extends PagedView
         super.onChildViewAdded(parent, child);
     }
 
+    @Override
     protected boolean shouldDrawChild(View child) {
         final CellLayout cl = (CellLayout) child;
         return super.shouldDrawChild(child) &&
@@ -549,10 +558,17 @@ public class Workspace extends PagedView
         return mTouchState != TOUCH_STATE_REST;
     }
 
+    private int getEmbeddedQsbId() {
+        return R.id.workspace_blocked_row;
+    }
+
     /**
      * Initializes and binds the first page
+     *
+     * @param qsb an exisitng qsb to recycle or null.
      */
-    public void bindAndInitFirstWorkspaceScreen() {
+    public void bindAndInitFirstWorkspaceScreen(View qsb) {
+
         // Add the first page
         CellLayout firstPage = insertNewWorkspaceScreen(Workspace.FIRST_SCREEN_ID, 0);
         if (FeatureFlags.pulldownSearch(getContext().getApplicationContext())) {
@@ -582,8 +598,40 @@ public class Workspace extends PagedView
                 }
             });
         }
+        // Always add a QSB on the first screen.
+        if (qsb == null) {
+            // In transposed layout, we add the QSB in the Grid. As workspace does not touch the
+            // edges, we do not need a full width QSB.
+            qsb = mLauncher.getLayoutInflater().inflate(R.layout.qsb_blocker_view,
+                    firstPage, false);
+        }
+
         CellLayout.LayoutParams lp = new CellLayout.LayoutParams(0, 0, firstPage.getCountX(), 1);
         lp.canReorder = false;
+        if (!firstPage.addViewToCellLayout(qsb, 0, getEmbeddedQsbId(), lp, FeatureFlags.showPixelBar(getContext()))) {
+            Log.e(TAG, "Failed to add to item at (0, 0) to CellLayout");
+        }
+    }
+
+    @Override
+    protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+        super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+
+        // Update the QSB to match the cell height. This is treating the QSB essentially as a child
+        // of workspace despite that it's not a true child.
+        // Note that it relies on the strict ordering of measuring the workspace before the QSB
+        // at the dragLayer level.
+        if (getChildCount() > 0) {
+            CellLayout firstPage = (CellLayout) getChildAt(0);
+            int cellHeight = firstPage.getCellHeight();
+
+            View qsbContainer = mLauncher.getQsbContainer();
+            ViewGroup.LayoutParams lp = qsbContainer.getLayoutParams();
+            if (cellHeight > 0 && lp.height != cellHeight) {
+                lp.height = cellHeight;
+                qsbContainer.setLayoutParams(lp);
+            }
+        }
     }
 
     public void removeAllWorkspaceScreens() {
@@ -592,13 +640,18 @@ public class Workspace extends PagedView
         // custom content screen
         disableLayoutTransitions();
 
+        // Recycle the QSB widget
+        View qsb = findViewById(getEmbeddedQsbId());
+        if (qsb != null) {
+            ((ViewGroup) qsb.getParent()).removeView(qsb);
+        }
         // Remove the pages and clear the screen models
         removeAllViews();
         mScreenOrder.clear();
         mWorkspaceScreens.clear();
 
         // Ensure that the first page is always present
-        bindAndInitFirstWorkspaceScreen();
+        bindAndInitFirstWorkspaceScreen(qsb);
 
         // Re-enable the layout transitions
         enableLayoutTransitions();
@@ -860,7 +913,7 @@ public class Workspace extends PagedView
             long id = mWorkspaceScreens.keyAt(i);
             CellLayout cl = mWorkspaceScreens.valueAt(i);
             // FIRST_SCREEN_ID can never be removed.
-            if (id > FIRST_SCREEN_ID && cl.getShortcutsAndWidgets().getChildCount() == 0) {
+            if ((!FeatureFlags.showPixelBar(getContext()) || id != FIRST_SCREEN_ID) && cl.getShortcutsAndWidgets().getChildCount() == 0) {
                 removeScreens.add(id);
             }
         }
@@ -999,7 +1052,7 @@ public class Workspace extends PagedView
         ItemInfo info = (ItemInfo) child.getTag();
         int childId = mLauncher.getViewIdForItem(info);
 
-        if (!layout.addViewToCellLayout(child, insert ? 0 : -1, childId, lp)) {
+        if (!layout.addViewToCellLayout(child, insert ? 0 : -1, childId, lp, true)) {
             // TODO: This branch occurs when the workspace is adding views
             // outside of the defined grid
             // maybe we should be deleting these items from the LauncherModel?
@@ -1043,6 +1096,7 @@ public class Workspace extends PagedView
         return !mIsSwitchingState || (mTransitionProgress > 0.5f);
     }
 
+    @Override
     protected void onWindowVisibilityChanged(int visibility) {
         mLauncher.onWindowVisibilityChanged(visibility);
     }
@@ -1110,6 +1164,7 @@ public class Workspace extends PagedView
         }
     }
 
+    @Override
     protected void onPageBeginMoving() {
         super.onPageBeginMoving();
 
@@ -1127,6 +1182,7 @@ public class Workspace extends PagedView
         }
     }
 
+    @Override
     protected void onPageEndMoving() {
         super.onPageEndMoving();
 
@@ -1159,11 +1215,13 @@ public class Workspace extends PagedView
         }
     }
 
+    @Override
     protected void onScrollInteractionBegin() {
         super.onScrollInteractionEnd();
         mScrollInteractionBegan = true;
     }
 
+    @Override
     protected void onScrollInteractionEnd() {
         super.onScrollInteractionEnd();
         mScrollInteractionBegan = false;
@@ -1180,6 +1238,7 @@ public class Workspace extends PagedView
         onOverlayScrollChanged(0);
     }
 
+    @Override
     protected int getUnboundedScrollX() {
         if (isScrollingOverlay()) {
             return mUnboundedScrollX;
@@ -1217,9 +1276,17 @@ public class Workspace extends PagedView
         super.scrollTo(x, y);
     }
 
+    private void onWorkspaceOverallScrollChanged() {
+        if (!mIgnoreQsbScroll) {
+            mLauncher.getQsbContainer().setTranslationX(
+                    mOverlayTranslation + mFirstPageScrollX - getScrollX());
+        }
+    }
+
     @Override
     protected void onScrollChanged(int l, int t, int oldl, int oldt) {
         super.onScrollChanged(l, t, oldl, oldt);
+        onWorkspaceOverallScrollChanged();
 
         // Update the page indicator progress.
         boolean isTransitioning = mIsSwitchingState
@@ -1241,8 +1308,8 @@ public class Workspace extends PagedView
         boolean shouldScrollOverlay = mLauncherOverlay != null && mLauncher.isClientConnected() &&
                 ((amount <= 0 && !mIsRtl) || (amount >= 0 && mIsRtl));
 
-        boolean shouldZeroOverlay = mLauncherOverlay != null  && mLauncher.isClientConnected() &&
-         mLastOverlaySroll != 0 && ((amount >= 0 && !mIsRtl) || (amount <= 0 && mIsRtl));
+        boolean shouldZeroOverlay = mLauncherOverlay != null && mLauncher.isClientConnected() &&
+                mLastOverlaySroll != 0 && ((amount >= 0 && !mIsRtl) || (amount <= 0 && mIsRtl));
 
         if (shouldScrollOverlay) {
             if (!mStartedSendingScrollEvents && mScrollInteractionBegan) {
@@ -1287,6 +1354,9 @@ public class Workspace extends PagedView
         // device I've tried, translating the launcher causes things to get quite laggy.
         setWorkspaceTranslationAndAlpha(Direction.X, transX, alpha);
         setHotseatTranslationAndAlpha(Direction.X, transX, alpha);
+        onWorkspaceOverallScrollChanged();
+
+        mQsbAlphaController.setAlphaAtIndex(alpha, QSB_ALPHA_INDEX_OVERLAY_SCROLL);
     }
 
     /**
@@ -1297,6 +1367,9 @@ public class Workspace extends PagedView
      */
     public void setWorkspaceYTranslationAndAlpha(float translation, float alpha) {
         setWorkspaceTranslationAndAlpha(Direction.Y, translation, alpha);
+
+        mLauncher.getQsbContainer().setTranslationY(translation);
+        mQsbAlphaController.setAlphaAtIndex(alpha, QSB_ALPHA_INDEX_Y_TRANSLATION);
     }
 
     /**
@@ -1377,6 +1450,7 @@ public class Workspace extends PagedView
         }
     }
 
+    @Override
     protected Matrix getPageShiftMatrix() {
         if (Float.compare(mOverlayTranslation, 0) != 0) {
             // The pages are translated by mOverlayTranslation. incorporate that in the
@@ -1477,6 +1551,10 @@ public class Workspace extends PagedView
                     float scrollProgress = getScrollProgress(screenCenter, child, i);
                     float alpha = 1 - Math.abs(scrollProgress);
                     child.getShortcutsAndWidgets().setAlpha(alpha);
+
+                    if (isQsbContainerPage(i)) {
+                        mQsbAlphaController.setAlphaAtIndex(alpha, QSB_ALPHA_INDEX_PAGE_SCROLL);
+                    }
                 }
             }
         }
@@ -1488,6 +1566,7 @@ public class Workspace extends PagedView
         enableHwLayersOnVisiblePages();
     }
 
+    @Override
     protected void onAttachedToWindow() {
         super.onAttachedToWindow();
         IBinder windowToken = getWindowToken();
@@ -1496,6 +1575,7 @@ public class Workspace extends PagedView
         mDragController.setWindowToken(windowToken);
     }
 
+    @Override
     protected void onDetachedFromWindow() {
         super.onDetachedFromWindow();
         mWallpaperOffset.setWindowToken(null);
@@ -1513,7 +1593,9 @@ public class Workspace extends PagedView
     private LayoutTransition.TransitionListener onLayoutLayoutTransitionListener = new LayoutTransition.TransitionListener() {
 
         @Override
-        public void startTransition(LayoutTransition transition, ViewGroup container, View view, int transitionType) {
+        public void startTransition(LayoutTransition transition, ViewGroup container,
+                                    View view, int transitionType) {
+            mIgnoreQsbScroll = true;
         }
 
         @Override
@@ -1521,8 +1603,10 @@ public class Workspace extends PagedView
                                   View view, int transitionType) {
             // Wait until all transitions are complete.
             if (!transition.isRunning()) {
+                mIgnoreQsbScroll = false;
                 transition.removeTransitionListener(this);
-                getScrollForPage(0);
+                mFirstPageScrollX = getScrollForPage(0);
+                onWorkspaceOverallScrollChanged();
             }
         }
     };
@@ -1538,7 +1622,8 @@ public class Workspace extends PagedView
             mWallpaperOffset.jumpToFinal();
         }
         super.onLayout(changed, left, top, right, bottom);
-        getScrollForPage(0);
+        mFirstPageScrollX = getScrollForPage(0);
+        onWorkspaceOverallScrollChanged();
 
         final LayoutTransition transition = getLayoutTransition();
         // If the transition is running defer updating max scroll, as some empty pages could
@@ -1694,12 +1779,14 @@ public class Workspace extends PagedView
         range[1] = Math.max(0, end);
     }
 
+    @Override
     public void onStartReordering() {
         super.onStartReordering();
         // Reordering handles its own animations, disable the automatic ones.
         disableLayoutTransitions();
     }
 
+    @Override
     public void onEndReordering() {
         super.onEndReordering();
 
@@ -1788,6 +1875,10 @@ public class Workspace extends PagedView
 
         if (shouldNotifyWidgetChange) {
             mLauncher.notifyWidgetProvidersChanged();
+        }
+
+        if (mOnStateChangeListener != null) {
+            mOnStateChangeListener.prepareStateChange(toState, animated ? workspaceAnim : null);
         }
 
         return workspaceAnim;
@@ -1991,6 +2082,7 @@ public class Workspace extends PagedView
     /**
      * {@inheritDoc}
      */
+    @Override
     public boolean acceptDrop(DragObject d) {
         // If it's an external drop (e.g. from All Apps), check if it should be accepted
         CellLayout dropTargetLayout = mDropToLayout;
@@ -2210,6 +2302,7 @@ public class Workspace extends PagedView
     public void prepareAccessibilityDrop() {
     }
 
+    @Override
     public void onDrop(final DragObject d) {
         mDragViewVisualCenter = d.getVisualCenter(mDragViewVisualCenter);
         CellLayout dropTargetLayout = mDropToLayout;
@@ -2327,6 +2420,7 @@ public class Workspace extends PagedView
                         if (pInfo != null && pInfo.resizeMode != AppWidgetProviderInfo.RESIZE_NONE
                                 && !d.accessibleDrag) {
                             mDelayedResizeRunnable = new Runnable() {
+                                @Override
                                 public void run() {
                                     if (!isPageMoving() && !mIsSwitchingState) {
                                         DragLayer dragLayer = mLauncher.getDragLayer();
@@ -2664,6 +2758,7 @@ public class Workspace extends PagedView
                 d.dragInfo instanceof PendingAddWidgetInfo);
     }
 
+    @Override
     public void onDragOver(DragObject d) {
         // Skip drag over events while we are dragging over side pages
         if (mInScrollArea || !transitionStateShouldAllowDrop()) return;
@@ -2802,7 +2897,7 @@ public class Workspace extends PagedView
                 mFolderCreationAlarm.setOnAlarmListener(listener);
                 mFolderCreationAlarm.setAlarm(FOLDER_CREATION_TIMEOUT);
             } else {
-                listener.onAlarm();
+                listener.onAlarm(mFolderCreationAlarm);
             }
 
             if (dragObject.stateAnnouncer != null) {
@@ -2858,7 +2953,8 @@ public class Workspace extends PagedView
             bg.isClipping = false;
         }
 
-        public void onAlarm() {
+        @Override
+        public void onAlarm(Alarm alarm) {
             mFolderCreateBg = bg;
             mFolderCreateBg.animateToAccept(layout, cellX, cellY);
             layout.clearDragOutlines();
@@ -2881,7 +2977,8 @@ public class Workspace extends PagedView
             this.dragObject = dragObject;
         }
 
-        public void onAlarm() {
+        @Override
+        public void onAlarm(Alarm alarm) {
             int[] resultSpan = new int[2];
             mTargetCell = findNearestArea((int) mDragViewVisualCenter[0],
                     (int) mDragViewVisualCenter[1], minSpanX, minSpanY, mDragTargetLayout,
@@ -3257,10 +3354,12 @@ public class Workspace extends PagedView
     /**
      * Called at the end of a drag which originated on the workspace.
      */
+    @Override
     public void onDropCompleted(final View target, final DragObject d,
                                 final boolean isFlingToDelete, final boolean success) {
         if (mDeferDropAfterUninstall) {
             mDeferredAction = new Runnable() {
+                @Override
                 public void run() {
                     onDropCompleted(target, d, isFlingToDelete, success);
                     mDeferredAction = null;
@@ -3370,6 +3469,7 @@ public class Workspace extends PagedView
         // Do nothing
     }
 
+    @Override
     public boolean isDropEnabled() {
         return true;
     }
@@ -3904,4 +4004,36 @@ public class Workspace extends PagedView
         }
     }
 
+    public void setOnStateChangeListener(OnStateChangeListener listener) {
+        mOnStateChangeListener = listener;
+    }
+
+    public interface OnStateChangeListener {
+
+        /**
+         * Called when the workspace state is changing.
+         *
+         * @param toState    final state
+         * @param targetAnim animation which will be played during the transition or null.
+         */
+        void prepareStateChange(State toState, AnimatorSet targetAnim);
+    }
+
+    public static boolean isQsbContainerPage(int pageNo) {
+        return pageNo == 0;
+    }
+
+    public void updateQsbVisibility() {
+        boolean visible = FeatureFlags.showPixelBar(getContext());
+        View qsb = findViewById(getEmbeddedQsbId());
+        if (qsb != null) {
+            qsb.setVisibility(visible ? View.VISIBLE : View.GONE);
+            CellLayout firstPage = mWorkspaceScreens.get(FIRST_SCREEN_ID);
+            if (!visible) {
+                firstPage.markCellsAsUnoccupiedForView(qsb);
+            } else {
+                firstPage.markCellsAsOccupiedForView(qsb);
+            }
+        }
+    }
 }

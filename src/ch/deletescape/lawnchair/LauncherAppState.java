@@ -113,7 +113,7 @@ public class LauncherAppState {
         UserManagerCompat.getInstance(sContext).enableAndResetCache();
         new ConfigMonitor(sContext).register();
 
-        if(Utilities.isNycOrAbove()){
+        if (Utilities.isNycOrAbove()) {
             ExtractionUtils.startColorExtractionServiceIfNecessary(sContext);
         } else {
             ExtractionUtils.startColorExtractionService(sContext);
@@ -129,12 +129,21 @@ public class LauncherAppState {
         mModel.startLoaderFromBackground();
     }
 
-    public void reloadAll() {
+    public void reloadAll(boolean showWorkspace) {
         mModel.resetLoadedState(true, true);
         mModel.startLoaderFromBackground();
         mInvariantDeviceProfile.customizationHook(getContext());
-        mLauncher.getHotseat().refresh();
-        mLauncher.showWorkspace(true);
+        mLauncher.runOnUiThread(
+                new Runnable() {
+                    @Override
+                    public void run() {
+                        mLauncher.getHotseat().refresh();
+                    }
+                }
+        );
+        if (showWorkspace) {
+            mLauncher.showWorkspace(true);
+        }
     }
 
     LauncherModel setLauncher(Launcher launcher) {
